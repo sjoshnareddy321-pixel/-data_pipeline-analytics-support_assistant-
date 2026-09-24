@@ -1,0 +1,382 @@
+#module 2 part B
+from pathlib import Path
+import warnings
+import joblib
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, roc_curve, roc_auc_score, mean_absolute_error,
+    mean_squared_error, r2_score
+)
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.tree import DecisionTreeClassifier, plot_tree
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+
+warnings.filterwarnings("ignore")
+
+BASE = Path('/content') # Corrected path for Colab environment
+CHARTS = BASE / "charts"
+OUT = BASE / "outputs"
+sns.set_theme(style="whitegrid")
+
+
+def load_clean_same_dataset():
+    # Modeling reads the committed offline fallback created by 01_eda.py.
+    # It does NOT call sns.load_dataset again.
+    df = pd.read_csv(BASE / "titanic.csv")
+
+    if "deck" in df.columns:
+        df = df.drop(columns=["deck"])
+    df = df.dropna(subset=["embarked"])
+    df["age"] = df["age"].fillna(df["age"].median())
+    if "embark_town" in df.columns:
+        df["embark_town"] = df["embark_town"].fillna("Unknown")
+    return df.reset_index(drop=True)
+
+
+def make_preprocessor(numeric, categorical):
+    numeric_pipe = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+    ])
+    categorical_pipe = Pipeline([
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+    ])
+    return ColumnTransformer([
+        ("num", numeric_pipe, numeric),
+        ("cat", categorical_pipe, categorical),
+    ])
+
+
+def classification_models(X_train, X_test, y_train, y_test):
+    numeric = ["age", "sibsp", "parch", "fare", "pclass"]
+    categorical = ["sex", "embarked"]
+
+    models = {
+        "Logistic Regression": LogisticRegression(max_iter=2000, random_state=42),
+        "Decision Tree": DecisionTreeClassifier(max_depth=5, random_state=42),
+        "Random Forest": RandomForestClassifier(
+            n_estimators=300, random_state=42, n_jobs=-1, oob_score=True
+        ),
+    }
+
+    results = []
+    fitted = {}
+
+    for name, estimator in models.items():
+        pipe = Pipeline([
+            ("preprocess", make_preprocessor(numeric, categorical)),
+            ("model", estimator),
+        ])
+        pipe.fit(X_train, y_train)
+        pred = pipe.predict(X_test)
+        proba = pipe.predict_proba(X_test)[:, 1]
+
+        metrics = {
+            "model": name,
+            "accuracy": accuracy_score(y_test, pred),
+            "precision": precision_score(y_test, pred, zero_division=0),
+            "recall": recall_score(y_test, pred, zero_division=0),
+            "f1": f1_score(y_test, pred, zero_division=0),
+            "auc": roc_auc_score(y_test, proba),
+        }
+        results.append(metrics)
+        fitted[name] = (pipe, pred, proba)
+
+        cm = confusion_matrix(y_test, pred)
+        plt.figure(figsize=(5, 4))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+        plt.title(f"{name} — Confusion Matrix")
+        plt.xlabel("Predicted")
+        plt.ylabel("Actual")
+        plt.tight_layout()
+        plt.savefig(CHARTS / f"{name.lower().replace(' ', '_')}_confusion_matrix.png", dpi=160)
+        plt.close()
+
+    # ROC curves together.
+    plt.figure(figsize=(7, 5))
+    for name, (_, _, proba) in fitted.items():
+        fpr, tpr, _ = roc_curve(y_test, proba)
+        auc = roc_auc_score(y_test, proba)
+        plt.plot(fpr, tpr, label=f"{name} (AUC={auc:.3f})")
+    plt.plot([0, 1], [0, 1], linestyle="--", label="Chance")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curves")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(CHARTS / "roc_curves.png", dpi=160)
+    plt.close()
+
+    return pd.DataFrame(results), fitted
+
+
+def plot_decision_tree(pipe):
+    pre = pipe.named_steps["preprocess"]
+    model = pipe.named_steps["model"]
+    feature_names = pre.get_feature_names_out()
+
+    plt.figure(figsize=(22, 12))
+    plot_tree(
+        model,
+        feature_names=feature_names,
+        class_names=["Not survived", "Survived"],
+        filled=True,
+        max_depth=4,
+        fontsize=8,
+    )
+    plt.title("Decision Tree")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "decision_tree.png", dpi=160)
+    plt.close()
+
+
+def imbalance_comparison(X_train, X_test, y_train, y_test):
+    numeric = ["age", "sibsp", "parch", "fare", "pclass"]
+    categorical = ["sex", "embarked"]
+
+    variants = {
+        "baseline": LogisticRegression(max_iter=2000, random_state=42),
+        "class_weight_balanced": LogisticRegression(
+            max_iter=2000, class_weight="balanced", random_state=42
+        ),
+    }
+
+    rows = []
+    for label, model in variants.items():
+        pipe = Pipeline([
+            ("preprocess", make_preprocessor(numeric, categorical)),
+            ("model", model),
+        ])
+        pipe.fit(X_train, y_train)
+        pred = pipe.predict(X_test)
+        rows.append({
+            "strategy": label,
+            "precision": precision_score(y_test, pred, zero_division=0),
+            "recall": recall_score(y_test, pred, zero_division=0),
+            "f1": f1_score(y_test, pred, zero_division=0),
+        })
+
+    # SMOTE must happen after train-only preprocessing and only inside the training
+    # fold. The imblearn pipeline guarantees test data is transformed but never
+    # oversampled.
+    smote_pipe = ImbPipeline([
+        ("preprocess", make_preprocessor(numeric, categorical)),
+        ("smote", SMOTE(random_state=42)),
+        ("model", LogisticRegression(max_iter=2000, random_state=42)),
+    ])
+    smote_pipe.fit(X_train, y_train)
+    pred = smote_pipe.predict(X_test)
+    rows.append({
+        "strategy": "SMOTE_training_only",
+        "precision": precision_score(y_test, pred, zero_division=0),
+        "recall": recall_score(y_test, pred, zero_division=0),
+        "f1": f1_score(y_test, pred, zero_division=0),
+    })
+
+    result = pd.DataFrame(rows)
+    result.to_csv(OUT / "imbalance_comparison.csv", index=False)
+    return result
+
+
+def random_forest_grid_search(X_train, y_train):
+    numeric = ["age", "sibsp", "parch", "fare", "pclass"]
+    categorical = ["sex", "embarked"]
+
+    # OOB score is enabled on the estimator as required.
+    pipe = Pipeline([
+        ("preprocess", make_preprocessor(numeric, categorical)),
+        ("model", RandomForestClassifier(
+            random_state=42,
+            oob_score=True,
+            n_jobs=-1,
+        )),
+    ])
+
+    grid = {
+        "model__n_estimators": [100, 200, 300],
+        "model__max_depth": [None, 5, 10],
+        "model__max_features": ["sqrt", "log2"],
+    }
+
+    search = GridSearchCV(
+        pipe, grid, cv=5, scoring="f1", n_jobs=-1, refit=True
+    )
+    search.fit(X_train, y_train)
+
+    best = search.best_estimator_
+    oob = best.named_steps["model"].oob_score_
+
+    pd.DataFrame([{
+        "best_params": str(search.best_params__ if hasattr(search, "best_params__") else search.best_params_),
+        "best_cv_f1": search.best_score_,
+        "oob_score": oob,
+    }]).to_csv(OUT / "random_forest_grid_search.csv", index=False)
+
+    return search, oob
+
+
+def regression_task(df):
+    target = "fare"
+    features = ["age", "sibsp", "parch", "pclass", "sex", "embarked"]
+
+    X = df[features]
+    y = df[target]
+
+    numeric = ["age", "sibsp", "parch", "pclass"]
+    categorical = ["sex", "embarked"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    pipe = Pipeline([
+        ("preprocess", make_preprocessor(numeric, categorical)),
+        ("model", LinearRegression()),
+    ])
+    pipe.fit(X_train, y_train)
+    pred = pipe.predict(X_test)
+
+    mae = mean_absolute_error(y_test, pred)
+    rmse = np.sqrt(mean_squared_error(y_test, pred))
+    r2 = r2_score(y_test, pred)
+    n = len(y_test)
+    p = pipe.named_steps["preprocess"].transform(X_test).shape[1]
+    adjusted_r2 = 1 - (1 - r2) * (n - 1) / max(n - p - 1, 1)
+
+    residuals = y_test - pred
+    abs_corr = np.corrcoef(pred, np.abs(residuals))[0, 1]
+    hetero = abs(abs_corr) > 0.20
+
+    plt.figure(figsize=(7, 5))
+    sns.scatterplot(x=pred, y=residuals)
+    plt.axhline(0, linestyle="--")
+    plt.xlabel("Predicted fare")
+    plt.ylabel("Residual")
+    plt.title("Fare Regression Residual Plot")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "fare_residual_plot.png", dpi=160)
+    plt.close()
+
+    result = pd.DataFrame([{
+        "MAE": mae,
+        "RMSE": rmse,
+        "R2": r2,
+        "Adjusted_R2": adjusted_r2,
+        "abs_corr_fitted_abs_residual": abs(abs_corr),
+        "heteroscedasticity_flag": hetero,
+    }])
+    result.to_csv(OUT / "regression_metrics.csv", index=False)
+    return result
+
+
+def save_and_reload_best(fitted, y_test):
+    # Select the fitted classifier with highest F1, then save the COMPLETE pipeline.
+    scores = {
+        name: f1_score(y_test, pred, zero_division=0)
+        for name, (_, pred, _) in fitted.items()
+    }
+    best_name = max(scores, key=scores.get)
+    best_pipeline = fitted[best_name][0]
+
+    artifact = BASE / "best_titanic_pipeline.joblib"
+    joblib.dump(best_pipeline, artifact)
+
+    reloaded = joblib.load(artifact)
+
+    # Raw input: no preprocessing is performed by the caller.
+    sample = pd.DataFrame([{
+        "age": 30,
+        "sibsp": 0,
+        "parch": 0,
+        "fare": 20.0,
+        "pclass": 2,
+        "sex": "female",
+        "embarked": "S",
+    }])
+    prediction = reloaded.predict(sample)[0]
+
+    with open(OUT / "artifact_check.txt", "w", encoding="utf-8") as f:
+        f.write(f"Selected pipeline: {best_name}\n")
+        f.write(f"Test F1: {scores[best_name]:.6f}\n")
+        f.write(f"Raw-input prediction for sample: {prediction}\n")
+        f.write("Reload successful: True\n")
+
+    return best_name, scores
+
+
+def main():
+    OUT.mkdir(exist_ok=True)
+    CHARTS.mkdir(exist_ok=True) # Ensure the charts directory exists
+
+    df = load_clean_same_dataset()
+
+    X = df.drop(columns=["survived"])
+    y = df["survived"]
+
+    print("CLASS BALANCE:")
+    print(y.value_counts())
+    print(y.value_counts(normalize=True))
+
+    # Split BEFORE preprocessing; stratification preserves the observed target proportions.
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    metrics, fitted = classification_models(X_train, X_test, y_train, y_test)
+    plot_decision_tree(fitted["Decision Tree"][0])
+    metrics.to_csv(OUT / "classification_metrics.csv", index=False)
+
+    imbalance = imbalance_comparison(X_train, X_test, y_train, y_test)
+    print("\nCLASSIFIER METRICS:\n", metrics)
+    print("\nIMBALANCE COMPARISON:\n", imbalance)
+
+    search, oob = random_forest_grid_search(X_train, y_train)
+    print("\nRF BEST PARAMETERS:", search.best_params_)
+    print("RF OOB SCORE:", oob)
+
+    regression = regression_task(df)
+    print("\nREGRESSION METRICS:\n", regression)
+
+    best_name, scores = save_and_reload_best(fitted, y_test)
+
+    # Classification and regression metrics are deliberately separate groups.
+    comparison = metrics.copy()
+    for col in ["MAE", "RMSE", "R2", "Adjusted_R2"]:
+        comparison[col] = np.nan
+    for col, value in regression.iloc[0][["MAE", "RMSE", "R2", "Adjusted_R2"]].items():
+        comparison.loc[comparison.index[0], col] = value
+    comparison.to_csv(OUT / "model_comparison.csv", index=False)
+
+    best_row = metrics.loc[metrics["model"] == best_name].iloc[0]
+    conclusion = (
+        f"The complete pipeline selected for deployment is **{best_name}** because it had "
+        f"the highest test F1 among the three classifiers ({best_row['f1']:.3f}), while its "
+        f"accuracy was {best_row['accuracy']:.3f}, precision {best_row['precision']:.3f}, "
+        f"recall {best_row['recall']:.3f}, and AUC {best_row['auc']:.3f}. "
+        f"These values should be interpreted together because accuracy, precision, recall, "
+        f"F1, and AUC capture different aspects of classification performance. "
+        f"The regression model is evaluated separately using MAE {regression.iloc[0]['MAE']:.3f}, "
+        f"RMSE {regression.iloc[0]['RMSE']:.3f}, R² {regression.iloc[0]['R2']:.3f}, and "
+        f"Adjusted R² {regression.iloc[0]['Adjusted_R2']:.3f}; those regression metrics are "
+        f"not directly comparable with the classifier metrics."
+    )
+    (OUT / "FINAL_RECOMMENDATION.md").write_text(
+        "# Final model recommendation\n\n" + conclusion + "\n", encoding="utf-8"
+    )
+
+
+if __name__ == "__main__":
+    main()
