@@ -1,0 +1,271 @@
+#module 2 Part A
+from pathlib import Path
+import json
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+
+BASE = Path('/content') # Corrected path for Colab environment
+CHARTS = BASE / "charts"
+OUT = BASE / "outputs"
+CHARTS.mkdir(exist_ok=True)
+OUT.mkdir(exist_ok=True)
+
+sns.set_theme(style="whitegrid")
+
+
+def load_once_and_save_fallback():
+    """The only sns.load_dataset call in the whole module."""
+    fallback = BASE / "titanic.csv"
+    try:
+        df = sns.load_dataset("titanic")
+        df.to_csv(fallback, index=False)
+        source = "sns.load_dataset('titanic')"
+    except Exception as exc:
+        if not fallback.exists():
+            raise RuntimeError(
+                "Titanic could not be downloaded and no titanic.csv fallback exists."
+            ) from exc
+        df = pd.read_csv(fallback)
+        source = f"offline fallback: titanic.csv ({type(exc).__name__})"
+    return df, source
+
+
+def missing_report(df):
+    missing = (df.isna().mean() * 100).loc[lambda s: s > 0].sort_values(ascending=False)
+    missing.to_csv(OUT / "missing_percentages.csv", header=["missing_percent"])
+    return missing
+
+
+def clean_data(df):
+    data = df.copy()
+
+    # Rule:
+    # <5% -> drop affected rows
+    # 5%-30% -> median/mode imputation
+    # >30% -> drop column or encode missing as a category.
+    # deck has very high missingness, so it is dropped.
+    if "deck" in data.columns:
+        data = data.drop(columns=["deck"])
+
+    # Under 5% missing: drop rows for categorical embarked.
+    if "embarked" in data.columns:
+        data = data.dropna(subset=["embarked"])
+
+    # 5%-30% missing: median-impute age.
+    if "age" in data.columns:
+        data["age"] = data["age"].fillna(data["age"].median())
+
+    # Keep embark_town consistent if retained; it is redundant with embarked.
+    # It is not used in the modeling feature set.
+    if "embark_town" in data.columns:
+        data["embark_town"] = data["embark_town"].fillna("Unknown")
+
+    return data.reset_index(drop=True)
+
+
+def iqr_count(s):
+    q1, q3 = s.quantile([0.25, 0.75])
+    iqr = q3 - q1
+    return int(((s < q1 - 1.5 * iqr) | (s > q3 + 1.5 * iqr)).sum())
+
+
+def survival_tables(df):
+    by_sex = df.groupby("sex", as_index=False)["survived"].mean().rename(columns={"survived": "survival_rate"})
+    by_class = df.groupby("pclass", as_index=False)["survived"].mean().rename(columns={"survived": "survival_rate"})
+    by_both = (
+        df.groupby(["sex", "pclass"], as_index=False)["survived"]
+        .mean()
+        .rename(columns={"survived": "survival_rate"})
+    )
+    by_sex.to_csv(OUT / "survival_by_sex.csv", index=False)
+    by_class.to_csv(OUT / "survival_by_pclass.csv", index=False)
+    by_both.to_csv(OUT / "survival_by_sex_pclass.csv", index=False)
+    return by_sex, by_class, by_both
+
+
+def correlation_analysis(df):
+    cols = ["survived", "pclass", "age", "sibsp", "parch", "fare"]
+    corr = df[cols].corr()
+    corr.to_csv(OUT / "correlation_matrix.csv")
+
+    upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+    pairs = (
+        upper.stack()
+        .rename("correlation")
+        .to_frame()
+    )
+    pairs["absolute"] = pairs["correlation"].abs()
+    pairs = pairs.sort_values("absolute", ascending=False)
+    pairs.head(2).to_csv(OUT / "two_strongest_correlations.csv")
+
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(corr, annot=True, fmt=".2f", cmap="vlag", center=0)
+    plt.title("Titanic Numeric Correlations")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "correlation_heatmap.png", dpi=160)
+    plt.close()
+    return corr, pairs.head(2)
+
+
+def standardized_check(df):
+    data = df.copy()
+    scaler = StandardScaler()
+    data[["age_z", "fare_z"]] = scaler.fit_transform(data[["age", "fare"]])
+    summary = pd.DataFrame({
+        "column": ["age", "fare"],
+        "before_mean": [data["age"].mean(), data["fare"].mean()],
+        "before_std": [data["age"].std(ddof=0), data["fare"].std(ddof=0)],
+        "after_mean": [data["age_z"].mean(), data["fare_z"].mean()],
+        "after_std": [data["age_z"].std(ddof=0), data["fare_z"].std(ddof=0)],
+    })
+    summary.to_csv(OUT / "standardization_check.csv", index=False)
+    return summary
+
+
+def make_eda_charts(df):
+    # Required age histogram + box plot.
+    plt.figure(figsize=(7, 5))
+    sns.histplot(df["age"], kde=True)
+    plt.title("Age Distribution")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "age_histogram.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(7, 4))
+    sns.boxplot(x=df["age"])
+    plt.title("Age Box Plot")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "age_boxplot.png", dpi=160)
+    plt.close()
+
+    # Required fare histogram + box plot.
+    plt.figure(figsize=(7, 5))
+    sns.histplot(df["fare"], kde=True)
+    plt.title("Fare Distribution")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "fare_histogram.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(7, 4))
+    sns.boxplot(x=df["fare"])
+    plt.title("Fare Box Plot")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "fare_boxplot.png", dpi=160)
+    plt.close()
+
+    # Four distinct multivariate/data-story charts.
+    plt.figure(figsize=(7, 5))
+    sns.barplot(data=df, x="sex", y="survived", hue="pclass")
+    plt.ylabel("Survival rate")
+    plt.title("Survival Rate by Sex and Passenger Class")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "story_survival_sex_class.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(7, 5))
+    sns.boxplot(data=df, x="survived", y="fare", hue="sex")
+    plt.title("Fare Distribution by Survival and Sex")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "story_fare_survival_sex.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(7, 5))
+    sns.scatterplot(data=df, x="age", y="fare", hue="survived", style="sex", alpha=0.7)
+    plt.title("Age, Fare and Survival")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "story_age_fare_survival.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(7, 5))
+    sns.boxplot(data=df, x="pclass", y="age", hue="survived")
+    plt.title("Age and Survival Across Passenger Classes")
+    plt.tight_layout()
+    plt.savefig(CHARTS / "story_age_class_survival.png", dpi=160)
+    plt.close()
+
+
+def main():
+    raw, source = load_once_and_save_fallback()
+
+    print("DATA SOURCE:", source)
+    print("\nINFO:")
+    raw.info()
+    print("\nDESCRIBE:")
+    print(raw.describe(include="all"))
+    print("\nSHAPE:", raw.shape)
+
+    missing = missing_report(raw)
+    print("\nMISSING PERCENTAGES:")
+    print(missing)
+
+    clean = clean_data(raw)
+    clean.to_csv(OUT / "clean_titanic.csv", index=False)
+
+    print("\nCLEAN SHAPE:", clean.shape)
+    print("\nIQR OUTLIERS")
+    print("age:", iqr_count(clean["age"]))
+    print("fare:", iqr_count(clean["fare"]))
+
+    fare_mean = clean["fare"].mean()
+    fare_median = clean["fare"].median()
+    fare_mode = clean["fare"].mode().iloc[0]
+    print("\nFARE MEAN/MEDIAN/MODE:", fare_mean, fare_median, fare_mode)
+
+    if fare_mean > fare_median > fare_mode:
+        skew = "right-skewed"
+    elif fare_mean < fare_median < fare_mode:
+        skew = "left-skewed"
+    else:
+        skew = "approximately symmetric/mixed"
+    print("FARE SKEW:", skew)
+
+    by_sex, by_class, by_both = survival_tables(clean)
+    print("\nSURVIVAL BY SEX:\n", by_sex)
+    print("\nSURVIVAL BY PCLASS:\n", by_class)
+    print("\nSURVIVAL BY SEX + PCLASS:\n", by_both)
+
+    corr, strongest = correlation_analysis(clean)
+    print("\nCORRELATION MATRIX:\n", corr)
+    print("\nTWO STRONGEST ABSOLUTE CORRELATIONS:\n", strongest)
+
+    standardized = standardized_check(clean)
+    print("\nSTANDARDIZATION CHECK:\n", standardized)
+
+    make_eda_charts(clean)
+
+    interpretations = f"""
+# EDA interpretations
+
+## Missing-value decisions
+- The exact missing percentages are in `outputs/missing_percentages.csv`.
+- Columns below 5% missing were handled by dropping affected rows.
+- Columns from 5% through 30% were imputed where appropriate; `age` uses the median.
+- `deck` was dropped because its missingness is above the 30% threshold, making direct imputation unreliable. It is also not required by the later model.
+- `embark_town` is redundant with `embarked`; it is not used as a modeling feature.
+
+## Fare distribution
+Mean = {fare_mean:.3f}, median = {fare_median:.3f}, mode = {fare_mode:.3f}. The ordering gives a **{skew}** distribution. The histogram and box plot provide the visual check, while the IQR outlier count is printed by the script.
+
+## Bivariate survival
+The CSV outputs report numeric survival rates for sex, passenger class, and the sex-by-class combination. These breakdowns should be read together rather than treating any one variable as an isolated explanation.
+
+## Correlation heatmap
+The heatmap uses exactly `survived`, `pclass`, `age`, `sibsp`, `parch`, and `fare`; `adult_male` and `alone` are intentionally excluded. The two strongest absolute off-diagonal correlations are generated in `outputs/two_strongest_correlations.csv` and printed by the script, so the interpretation is based on the actual cleaned data rather than a hard-coded claim.
+
+## Multivariate data story
+1. **Survival by sex and class:** This chart shows how survival rates vary jointly across sex and passenger class, making it possible to see interaction rather than relying only on separate averages.
+2. **Fare, survival and sex:** The box plot compares fare distributions across survival status and sex, showing how ticket price relates to the survivor groups without treating fare alone as causal.
+3. **Age, fare and survival:** The scatter plot places age and fare together and uses survival as an additional visual dimension, helping identify clusters and overlap.
+4. **Age, class and survival:** The class-stratified age plot shows how age distributions differ between survivors and non-survivors within each passenger class.
+
+## Standardization sanity check
+`outputs/standardization_check.csv` compares means and standard deviations before and after z-score transformation. The transformed age and fare columns should have means approximately 0 and population standard deviations approximately 1.
+"""
+    (OUT / "EDA_INTERPRETATIONS.md").write_text(interpretations.strip() + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
