@@ -1,6 +1,5 @@
-# -data_pipeline-analytics-support_assistant-
 Capstone project
-#writefile scrape_pipeline.py
+# scrape_pipeline.py
 
 from __future__ import annotations
 
