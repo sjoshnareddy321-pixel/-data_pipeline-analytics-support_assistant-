@@ -1,3 +1,172 @@
+# Data Pipeline — Books to Relational Catalog
+
+This module implements a raw-to-relational catalog pipeline:
+
+**scrape → clean → convert → normalize → load into SQLite → query with SQL → reproduce with pandas**
+
+## Data source
+
+The scraper uses the public practice site:
+
+`https://books.toscrape.com/`
+
+It scrapes the first **5 paginated All Products pages** and follows each book's detail page to obtain its category. The target is therefore at least 100 raw book rows and at least 3 categories.
+
+No login, API key, or paid service is required.
+
+## Fixed currency conversion
+
+The project-required artificial baseline is:
+
+**1 GBP = 105.50 INR**
+
+`price_inr` is calculated only as:
+
+`price_inr = price_gbp * 105.50`
+
+This is a fixed project constant, not a live or historical exchange rate. No currency API is used.
+
+## Schema
+
+The SQLite database contains two normalized tables:
+
+### categories
+
+- `category_id INTEGER PRIMARY KEY`
+- `category_name TEXT UNIQUE NOT NULL`
+
+### books
+
+- `book_id INTEGER PRIMARY KEY`
+- `title TEXT NOT NULL`
+- `price_gbp REAL NOT NULL`
+- `price_inr REAL NOT NULL`
+- `rating INTEGER NOT NULL`
+- `in_stock INTEGER NOT NULL`
+- `category_id INTEGER NOT NULL REFERENCES categories(category_id)`
+- `source_url TEXT`
+
+The category name is stored once in `categories`, while `books.category_id` is the foreign key.
+
+## Cleaning decisions
+
+- Currency symbols are removed from the price and the result is converted to `float`.
+- Star-rating words `One` through `Five` are mapped to integers `1` through `5`.
+- Availability text containing `In stock` becomes `True`; text containing `Out of stock` becomes `False`.
+- Numeric parse failures for `price_gbp` and `rating` are filled using the column median.
+- Missing/unparseable availability, category, or title is dropped because these fields cannot be meaningfully median-imputed.
+- Ratings are rounded, converted to integer, and constrained to the valid range 1–5.
+- Duplicate title/category rows are removed.
+- SQLite stores booleans as `0/1` integers, as is standard for SQLite.
+
+## Install
+
+From the repository root:
+
+```bash
+cd data_pipeline
+python -m venv .venv
+```
+
+Windows:
+
+```bash
+.venv\Scripts\activate
+```
+
+macOS/Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+## Run
+
+```bash
+python scrape_pipeline.py
+```
+
+The script runs end to end and creates:
+
+```text
+data_pipeline/
+├── scrape_pipeline.py
+├── requirements.txt
+├── README.md
+├── books_catalog.sqlite
+└── outputs/
+    ├── raw_books.csv
+    ├── clean_books.csv
+    ├── queries.sql
+    ├── query_outputs.txt
+    └── join_comparison.txt
+```
+
+The SQLite database is regenerated from scratch each time.
+
+## SQL requirements demonstrated
+
+The pipeline executes six queries:
+
+1. `SELECT` + `WHERE`
+2. `ORDER BY`
+3. `LIMIT`
+4. `DISTINCT`
+5. `BETWEEN`
+6. `JOIN`
+
+The SQL text and printed results are saved under `outputs/`.
+
+## SQL vs pandas JOIN
+
+The SQL JOIN combines `books` and `categories` using:
+
+```sql
+books.category_id = categories.category_id
+```
+
+The same relationship is reproduced in memory with:
+
+```python
+books_df.merge(categories_df, on="category_id", how="inner")
+```
+
+The script normalizes the column order/types and asserts that the two outputs are equivalent. The side-by-side results and the final `Equivalent: True` check are saved to:
+
+`outputs/join_comparison.txt`
+
+## Git workflow requirement
+
+The overall repository must show this history at least once:
+
+```bash
+git checkout main
+git pull
+
+git checkout -b feature/data-pipeline
+
+git add data_pipeline/
+git commit -m "Add data pipeline scraping and cleaning"
+
+git add data_pipeline/
+git commit -m "Add SQLite queries and pandas validation"
+
+git checkout main
+git merge feature/data-pipeline
+```
+
+The assignment checks that a feature branch was created, had at least two commits, and was merged back into `main`.
+
+
+
+
+
 # Module 3 — Support Assistant
 
 This module implements the supplied offline-first Zepto support-assistant specification.
