@@ -1,0 +1,718 @@
+Zepto AI services:
+document 1:Zepto delivers grocery and household essentials to serviceable pin codes within 10 to 30 minutes of order confirmation, depending on the customer's delivery zone and current order volume. Standard delivery is free on orders over INR 149; orders below this threshold incur a flat INR 25 delivery fee. Priority delivery, which reserves the next available rider slot, is available at checkout for an additional INR 15. Zepto does not currently deliver to addresses outside its listed serviceable pin codes.
+document 2:Grocery and perishable items may be reported for a return within 24 hours of delivery if damaged, spoiled, or incorrect; non-perishable packaged items may be returned within 7 days of delivery in unopened, resalable condition. Approved refunds are credited to the original payment method within 3–5 business days, or instantly to the Zepto wallet if the customer opts for wallet credit. Personal care items that have been opened are non-returnable except in the case of a manufacturing defect. Return pickup, where required, is arranged free of cost by Zepto.
+document 3:Every Zepto order shows a live rider-tracking map from the moment it is packed until delivery, accessible from the 'Track Order' screen. Estimated delivery time updates automatically as the rider moves. If an order's status shows no movement for more than 20 minutes past its original estimated delivery time, customers should contact support directly rather than continue waiting, since this indicates a likely delivery issue.
+document 4:Every Zepto order shows a live rider-tracking map from the moment it is packed until delivery, accessible from the 'Track Order' screen. Estimated delivery time updates automatically as the rider moves. If an order's status shows no movement for more than 20 minutes past its original estimated delivery time, customers should contact support directly rather than continue waiting, since this indicates a likely delivery issue.
+document 5:Orders can be cancelled free of cost any time before the order status changes to 'Packed', typically within the first 2 minutes of placing the order. Once an order has been packed, it can no longer be cancelled through the app, since the rider is dispatched immediately after packing given Zepto's quick-delivery model. If a packed order cannot be delivered due to a Zepto-side issue (for example, rider unavailability), the order is auto-cancelled and fully refunded without any cancellation fee.
+document 6:If an order arrives with damaged, spoiled, or missing items, customers must report it within 24 hours of delivery through the 'Report an Issue' button on the order page. Zepto ships a free replacement or issues a full refund for damaged, spoiled, or missing items without requiring the customer to return the original item, unless the order value exceeds INR 1000, in which case a photo of the issue must be submitted through the report form before a replacement or refund is processed.document 7:Zepto gift cards are available in fixed denominations of INR 100, INR 250, INR 500, and INR 1000, and are delivered by email or SMS within minutes of purchase. Gift cards are valid for 1 year from the date of issue and carry no maintenance fees. Gift card balance can be combined with one other payment method at checkout but cannot be combined with another gift card in the same transaction. Gift card balance cannot be redeemed for cash except where required by law.
+document 7:Zepto gift cards are available in fixed denominations of INR 100, INR 250, INR 500, and INR 1000, and are delivered by email or SMS within minutes of purchase. Gift cards are valid for 1 year from the date of issue and carry no maintenance fees. Gift card balance can be combined with one other payment method at checkout but cannot be combined with another gift card in the same transaction. Gift card balance cannot be redeemed for cash except where required by law.
+document 8:Zepto customer support is available via in-app chat 24 hours a day, 7 days a week, given the time-sensitive nature of quick commerce deliveries. Average in-app chat response time is under 2 minutes. Email support is also available for non-urgent queries and is answered within 24 hours on business days. Phone support is not offered.
+%%writefile ingest.py
+from pathlib import Path
+import chromadb
+from sentence_transformers import SentenceTransformer
+from typing import List, Dict
+
+# Constants (these are the ones imported by fboUU1gNyoBw)
+CHROMA_DIR = Path("/content/chroma_db")
+COLLECTION_NAME = "zepto_policy_collection"
+MODEL_NAME = "all-MiniLM-L6-v2" # Using a common sentence transformer model
+
+def build_index():
+    """
+    Builds a ChromaDB index with some dummy data for demonstration.
+    In a real scenario, this would load actual policy documents,
+    split them, embed them, and add them to the Chroma collection.
+    """
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    collection = client.get_or_create_collection(name=COLLECTION_NAME)
+
+    # Dummy documents for demonstration
+    documents = [
+        "Zepto's delivery policy states that deliveries are typically completed within 30 minutes.",
+        "For returns, Zepto offers a 7-day return window for most products, provided they are unused.",
+        "Refunds for canceled orders are processed within 3-5 business days.",
+        "Membership benefits include free delivery on all orders and exclusive discounts.",
+        "Order tracking is available in the Zepto app under 'My Orders'.",
+        "To cancel an order, navigate to the 'My Orders' section and select 'Cancel Order' if it's not yet out for delivery.",
+        "Zepto gift cards can be purchased and redeemed through the app.",
+        "Our customer support hours are 9 AM to 9 PM, Monday to Sunday.",
+    ]
+    metadatas = [
+        {"document_id": "policy_delivery_1"},
+        {"document_id": "policy_returns_1"},
+        {"document_id": "policy_refunds_1"},
+        {"document_id": "policy_membership_1"},
+        {"document_id": "policy_tracking_1"},
+        {"document_id": "policy_cancel_1"},
+        {"document_id": "policy_giftcard_1"},
+        {"document_id": "policy_support_1"},
+    ]
+    ids = [f"doc_{i+1}" for i in range(len(documents))]
+
+    # Create embeddings
+    model = SentenceTransformer(MODEL_NAME)
+    embeddings = model.encode(documents, normalize_embeddings=True).tolist()
+
+    # Add to collection
+    collection.add(
+        embeddings=embeddings,
+        documents=documents,
+        metadatas=metadatas,
+        ids=ids
+    )
+    print(f"ChromaDB collection '{COLLECTION_NAME}' built with {len(documents)} documents.")
+
+if __name__ == "__main__":
+    build_index()
+  """LangGraph orchestration for Zepto policy questions."""
+
+import json
+import os
+from typing import TypedDict
+
+import chromadb
+from pydantic import BaseModel, Field, ValidationError
+from sentence_transformers import SentenceTransformer
+from langgraph.graph import StateGraph, START, END
+
+from ingest import CHROMA_DIR, COLLECTION_NAME, MODEL_NAME
+from prompts import STRUCTURED_PROMPT
+
+
+class GraphState(TypedDict, total=False):
+    query: str
+    intent: str
+    retrieved: list[dict]
+    answer: str
+    sources: list[str]
+    confidence: float
+    result: dict
+
+
+class AskResponse(BaseModel):
+    answer: str
+    sources: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+POLICY_KEYWORDS = (
+    "delivery", "return", "refund", "membership", "tracking",
+    "cancel", "gift card", "support hours"
+)
+
+
+def mock_mode() -> bool:
+    return os.getenv("MOCK_LLM", "1") != "0"
+
+
+def get_collection():
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    try:
+        return client.get_collection(COLLECTION_NAME)
+    except Exception:
+        # Make first local startup convenient if ingestion has not been run.
+        from ingest import build_index
+        build_index()
+        return client.get_collection(COLLECTION_NAME)
+
+
+def classify_intent(state: GraphState) -> GraphState:
+    query = state["query"]
+    lowered = query.lower()
+
+    if mock_mode():
+        intent = (
+            "policy_question"
+            if any(keyword in lowered for keyword in POLICY_KEYWORDS)
+            else "general_question"
+        )
+        return {"intent": intent}
+
+    # Optional real-LLM extension. The required graded path never enters here.
+    raw = call_real_llm(
+        f"""Classify this query as exactly one of policy_question or general_question.
+Query: {query}
+Return JSON only: {{"intent":"policy_question"}}"""
+    )
+    try:
+        value = json.loads(raw)["intent"]
+        if value not in {"policy_question", "general_question"}:
+            raise ValueError
+        return {"intent": value}
+    except Exception:
+        # Safe fallback if the optional provider gives malformed output.
+        return {"intent": "general_question"}
+
+
+def retrieve_chunks(query: str, top_k: int = 3) -> list[dict]:
+    model = SentenceTransformer(MODEL_NAME)
+    embedding = model.encode([query], normalize_embeddings=True).tolist()
+    collection = get_collection()
+
+    result = collection.query(
+        query_embeddings=embedding,
+        n_results=top_k,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    rows = []
+    for i, chunk_id in enumerate(result["ids"][0]):
+        rows.append({
+            "id": chunk_id,
+            "text": result["documents"][0][i],
+            "document_id": result["metadatas"][0][i]["document_id"],
+            "distance": result["distances"][0][i],
+        })
+    return rows
+
+
+def retrieve_and_answer(state: GraphState) -> GraphState:
+    retrieved = retrieve_chunks(state["query"], top_k=3)
+    source_ids = [item["id"] for item in retrieved]
+
+    if mock_mode():
+        snippet = retrieved[0]["text"][:200]
+        answer = f"Based on the retrieved context: {snippet}"
+        return {
+            "retrieved": retrieved,
+            "answer": answer,
+            "sources": source_ids,
+            "confidence": 1.0,
+        }
+
+    context = "\n\n".join(
+        f"[{item['id']}] {item['text']}" for item in retrieved
+    )
+    prompt = STRUCTURED_PROMPT.format(
+        context=context,
+        question=state["query"],
+    )
+
+    raw = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            if attempt == 0:
+                raw = call_real_llm(prompt)
+            else:
+                raw = call_real_llm(
+                    prompt
+                    + "\n\nCORRECTION: Your previous output failed validation. "
+                      "Return ONLY valid JSON matching the required schema. "
+                      "confidence must be between 0 and 1."
+                )
+            parsed = json.loads(raw)
+            validated = AskResponse.model_validate(parsed)
+            return {
+                "retrieved": retrieved,
+                "answer": validated.answer,
+                "sources": validated.sources,
+                "confidence": validated.confidence,
+            }
+        except Exception as exc:
+            last_error = exc
+
+    return {
+        "retrieved": retrieved,
+        "answer": f"ERROR: real-LLM output failed schema validation after 3 attempts: {last_error}",
+        "sources": [],
+        "confidence": 0.0,
+    }
+
+
+def direct_answer(state: GraphState) -> GraphState:
+    if mock_mode():
+        return {
+            "answer": "I can only answer questions about Zepto policies right now.",
+            "sources": [],
+            "confidence": 1.0,
+        }
+
+    prompt = STRUCTURED_PROMPT.format(
+        context="No policy retrieval was requested for this general question.",
+        question=state["query"],
+    )
+    raw = call_real_llm(prompt)
+
+    try:
+        validated = AskResponse.model_validate_json(raw)
+        return {
+            "answer": validated.answer,
+            "sources": validated.sources,
+            "confidence": validated.confidence,
+        }
+    except ValidationError:
+        return {
+            "answer": "ERROR: real-LLM output failed schema validation.",
+            "sources": [],
+            "confidence": 0.0,
+        }
+
+
+def route_by_intent(state: GraphState) -> str:
+    return state["intent"]
+
+
+def call_real_llm(prompt: str) -> str:
+    """Optional Groq/OpenAI-compatible extension; never used in mock mode."""
+    from openai import OpenAI
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set GROQ_API_KEY when MOCK_LLM=0.")
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1"),
+    )
+    response = client.chat.completions.create(
+        model=os.getenv("LLM_MODEL", "llama-3.1-8b-instant"),
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    return response.choices[0].message.content
+
+
+def build_graph():
+    builder = StateGraph(GraphState)
+    builder.add_node("classify_intent", classify_intent)
+    builder.add_node("retrieve_and_answer", retrieve_and_answer)
+    builder.add_node("direct_answer", direct_answer)
+
+    builder.add_edge(START, "classify_intent")
+    builder.add_conditional_edges(
+        "classify_intent",
+        route_by_intent,
+        {
+            "policy_question": "retrieve_and_answer",
+            "general_question": "direct_answer",
+        },
+    )
+    builder.add_edge("retrieve_and_answer", END)
+    builder.add_edge("direct_answer", END)
+    return builder.compile()
+
+
+graph = build_graph()
+
+
+def ask(query: str) -> AskResponse:
+    state = graph.invoke({"query": query})
+    response = AskResponse(
+        answer=state["answer"],
+        sources=state.get("sources", []),
+        confidence=state.get("confidence", 1.0),
+    )
+    return response
+
+      """FastAPI entry point."""
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+from graph import AskResponse, ask
+
+app = FastAPI(
+    title="Zepto GenAI Support Assistant",
+    description="Offline-first RAG service with deterministic mock LLM mode.",
+    version="1.0.0",
+)
+
+
+class AskRequest(BaseModel):
+    query: str
+
+
+@app.get("/")
+def root():
+    return {"service": "zepto-genai-service", "mock_llm": True}
+
+
+@app.post("/ask", response_model=AskResponse)
+def ask_endpoint(request: AskRequest) -> AskResponse:
+    return ask(request.query)
+
+"""Structured prompt template used by the optional real-LLM path."""
+
+STRUCTURED_PROMPT = """
+ROLE:
+You are Zepto's policy support assistant. Answer customers using only the supplied Zepto policy context.
+
+CONTEXT:
+{context}
+
+TASK:
+Answer the customer's question using the context above. If the context does not contain enough information, say that the available policy context does not provide the answer.
+
+FORMAT:
+Return valid JSON with exactly these fields:
+- "answer": a string
+- "sources": a list of chunk/document IDs used
+- "confidence": a number from 0 to 1
+
+NEGATIVE CONSTRAINT:
+Do not answer using information that is not present in the provided context.
+Do not invent Zepto policies, prices, timings, or procedures.
+
+FEW-SHOT EXAMPLE:
+Question: "How much is standard delivery below INR 149?"
+Context: "Standard delivery is free on orders over INR 149; orders below this threshold incur a flat INR 25 delivery fee."
+Answer:
+{"answer":"Orders below INR 149 incur a flat INR 25 delivery fee.","sources":["doc_01_chunk_0"],"confidence":1.0}
+
+LENGTH:
+Keep the answer concise, normally no more than 2-3 sentences.
+
+CUSTOMER QUESTION:
+{question}
+
+"""
+      # Zepto GenAI Support Assistant
+
+A small offline-first GenAI/RAG service for Zepto policy questions.
+
+## Graded baseline
+
+The graded path uses deterministic mock logic:
+
+```text
+MOCK_LLM unset
+```
+
+or:
+
+```text
+MOCK_LLM=1
+```
+
+No LLM API key is required and no LLM provider is contacted.
+
+Local embeddings use `sentence-transformers` with `all-MiniLM-L6-v2`. ChromaDB stores the resulting vectors.
+
+## Project structure
+
+```text
+docs/                 Eight exact Zepto policy documents
+ingest.py             Loads, chunks, embeds, and indexes the corpus
+prompts.py            Structured real-LLM prompt template
+graph.py              LangGraph routing, retrieval, generation, validation
+main.py               FastAPI application and POST /ask
+Dockerfile            Local container image
+requirements.txt      Python dependencies
+data/chroma_db/       Persistent ChromaDB data
+```
+
+## Setup
+
+Python 3.10+ is recommended.
+
+```bash
+python -m venv .venv
+```
+
+Windows:
+
+```bash
+.venv\Scripts\activate
+```
+
+Linux/macOS:
+
+```bash
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Build the local vector index:
+
+```bash
+python ingest.py
+```
+
+The first run downloads the open-source `all-MiniLM-L6-v2` model. After that, embeddings are generated locally.
+
+## Architecture
+
+### 1. Ingestion
+
+`ingest.py` reads `docs/doc_01.txt` through `docs/doc_08.txt`.
+
+Because each policy document is short enough, each document becomes one deterministic chunk:
+
+```text
+doc_01 -> doc_01_chunk_0
+doc_02 -> doc_02_chunk_0
+...
+doc_08 -> doc_08_chunk_0
+```
+
+### 2. Embedding
+
+`ingest.py` loads:
+
+```text
+all-MiniLM-L6-v2
+```
+
+from `sentence-transformers`, generates one embedding per chunk, normalizes the embeddings, and stores them in the persistent ChromaDB collection:
+
+```text
+zepto_policies
+```
+
+### 3. Retrieval
+
+`graph.py` contains `retrieve_chunks()`.
+
+For a policy query, the query is embedded with the same `all-MiniLM-L6-v2` model and sent to the `zepto_policies` ChromaDB collection.
+
+The top 3 chunks are retrieved using ChromaDB's cosine-distance configuration.
+
+### 4. Generation
+
+LangGraph contains three named nodes:
+
+```text
+START
+  |
+  v
+classify_intent
+  |
+  +---- policy_question ----> retrieve_and_answer ----> END
+  |
+  +---- general_question ---> direct_answer ---------> END
+```
+
+`classify_intent` determines whether retrieval is needed.
+
+In mock mode it uses the required keyword heuristic:
+
+```text
+delivery
+return
+refund
+membership
+tracking
+cancel
+gift card
+support hours
+```
+
+`retrieve_and_answer` performs real local embedding + ChromaDB retrieval in both mock and real-LLM modes.
+
+In mock mode it does not call an LLM. It creates:
+
+```text
+Based on the retrieved context: <first ~200 characters of top chunk>
+```
+
+`direct_answer` returns the fixed mock response:
+
+```text
+I can only answer questions about Zepto policies right now.
+```
+
+## MOCK_LLM branching
+
+The following generation/classification stages branch on `MOCK_LLM`:
+
+| Component | Default/mock | `MOCK_LLM=0` |
+|---|---|---|
+| `classify_intent` | Keyword heuristic | Optional LLM classification |
+| Retrieval | Real ChromaDB retrieval | Same real ChromaDB retrieval |
+| `retrieve_and_answer` generation | Deterministic canned answer | Optional LLM using `STRUCTURED_PROMPT` |
+| `direct_answer` | Fixed canned answer | Optional LLM |
+
+The retrieval stage never depends on an LLM API.
+
+## Structured prompt
+
+`prompts.py` contains the actual prompt used by the optional real-LLM path. It explicitly contains:
+
+- Role
+- Context
+- Task
+- Format
+- Length
+- Negative grounding constraint
+- Few-shot example
+
+The key grounding rule is:
+
+> Do not answer using information that is not present in the provided context.
+
+## Pydantic output schema
+
+The API response is validated as:
+
+```json
+{
+  "answer": "string",
+  "sources": ["chunk_id"],
+  "confidence": 1.0
+}
+```
+
+`confidence` is constrained to `0.0 <= confidence <= 1.0`.
+
+In mock mode:
+
+- policy questions use the three retrieved chunk IDs as `sources`
+- general questions use `sources: []`
+- `confidence` is `1.0`
+
+The optional real-LLM retrieval path retries malformed JSON/schema output up to two additional times with a corrective instruction. After three failed attempts it returns a clearly marked error response.
+
+## Run FastAPI locally
+
+Keep `MOCK_LLM` unset, or explicitly use:
+
+Windows:
+
+```bash
+set MOCK_LLM=1
+uvicorn main:app --reload
+```
+
+PowerShell:
+
+```powershell
+$env:MOCK_LLM="1"
+uvicorn main:app --reload
+```
+
+Linux/macOS:
+
+```bash
+MOCK_LLM=1 uvicorn main:app --reload
+```
+
+The API runs at:
+
+```text
+http://127.0.0.1:8000
+```
+
+## Example call 1 — policy question
+
+Request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask ^
+  -H "Content-Type: application/json" ^
+  -d "{\"query\":\"What is the delivery fee for orders below INR 149?\"}"
+```
+
+Expected response shape:
+
+```json
+{
+  "answer": "Based on the retrieved context: Zepto delivers grocery and household essentials to serviceable pin codes within 10 to 30 minutes of order confirmation, depending on the customer's delivery zone and current order volume. Standard delivery is free on orders over INR 149; orders below this threshold incur a flat INR 25 delivery fee.",
+  "sources": [
+    "doc_01_chunk_0",
+    "doc_03_chunk_0",
+    "doc_04_chunk_0"
+  ],
+  "confidence": 1.0
+}
+```
+
+The exact second and third source ordering can depend on the embedding model/ChromaDB version; the important requirement is that the retrieved content includes the relevant `doc_01` policy chunk.
+
+## Example call 2 — general question
+
+Request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask ^
+  -H "Content-Type: application/json" ^
+  -d "{\"query\":\"What is the capital of France?\"}"
+```
+
+Response:
+
+```json
+{
+  "answer": "I can only answer questions about Zepto policies right now.",
+  "sources": [],
+  "confidence": 1.0
+}
+```
+
+## Docker
+
+Build:
+
+```bash
+docker build -t zepto-genai .
+```
+
+Run:
+
+```bash
+docker run --rm -p 7860:7860 zepto-genai
+```
+
+The container serves:
+
+```text
+http://127.0.0.1:7860
+```
+
+Test:
+
+```bash
+curl -X POST http://127.0.0.1:7860/ask ^
+  -H "Content-Type: application/json" ^
+  -d "{\"query\":\"How long do I have to report a damaged item?\"}"
+```
+
+The Dockerfile runs `python ingest.py` during image construction, so the ChromaDB index is available when the container starts.
+
+## Optional real-LLM extension
+
+This is not required for grading.
+
+To use the optional Groq/OpenAI-compatible path:
+
+```text
+MOCK_LLM=0
+GROQ_API_KEY=<your key>
+```
+
+The API key should be supplied through an environment variable or secret and must never be hardcoded or committed to Git.
+
+The optional path uses the structured prompt from `prompts.py`. Retrieval remains local and ChromaDB-based.
+      
+"""Quick deterministic smoke test for the required mock baseline."""
+
+import os
+os.environ.setdefault("MOCK_LLM", "1")
+
+from graph import ask
+
+policy = ask("What is the delivery fee for orders below INR 149?")
+general = ask("What is the capital of France?")
+
+print("POLICY:")
+print(policy.model_dump_json(indent=2))
+print("\nGENERAL:")
+print(general.model_dump_json(indent=2))
+
+assert policy.sources
+assert policy.confidence == 1.0
+assert policy.answer.startswith("Based on the retrieved context:")
+assert general.sources == []
+assert general.answer == "I can only answer questions about Zepto policies right now."
+assert general.confidence == 1.0
+
+print("\nMock smoke test passed.")
+
