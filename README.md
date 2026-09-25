@@ -164,6 +164,182 @@ git merge feature/data-pipeline
 The assignment checks that a feature branch was created, had at least two commits, and was merged back into `main`.
 
 
+# Module 2 — Analytics Pipeline
+
+This `/analytics` module follows the supplied assignment exactly: one Titanic dataset load, an offline CSV fallback, defensible cleaning, EDA/data story, train-only modeling preprocessing, three classifiers, imbalance comparison, Random Forest tuning with OOB, a fare regression side-task, and a reloadable complete pipeline artifact.
+
+## Files
+
+```text
+analytics/
+├── 01_eda.py
+├── 02_modeling.py
+├── requirements.txt
+├── titanic.csv                  # generated/committed offline fallback
+├── clean_titanic.csv            # generated cleaned working data
+├── best_titanic_pipeline.joblib # generated complete pipeline
+├── charts/
+└── outputs/
+```
+
+## Important dataset-loading rule
+
+`01_eda.py` contains the module's **only** `sns.load_dataset("titanic")` call. It immediately saves the returned raw DataFrame as:
+
+```python
+df.to_csv("titanic.csv", index=False)
+```
+
+`02_modeling.py` reads that committed CSV and never calls Seaborn's loader again.
+
+If the first run cannot access the internet, `01_eda.py` requires an already committed `titanic.csv` fallback. This prevents the modeling stage from becoming a second independent network load.
+
+## Install and run
+
+From the repository root:
+
+```bash
+cd analytics
+python -m venv .venv
+```
+
+Windows:
+
+```bash
+.venv\Scripts\activate
+```
+
+macOS/Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+Install:
+
+```bash
+pip install -r requirements.txt
+```
+
+Run EDA first:
+
+```bash
+python 01_eda.py
+```
+
+Then run modeling:
+
+```bash
+python 02_modeling.py
+```
+
+## Cleaning decisions
+
+The script calculates and saves exact missing percentages before cleaning in `outputs/missing_percentages.csv`.
+
+The required threshold rule is:
+
+- `<5%`: drop affected rows.
+- `5%–30%`: impute.
+- `>30%`: explicitly decide whether to drop the column or treat missingness as a category.
+
+The implementation:
+- drops rows missing `embarked` because it is below 5% missing;
+- median-imputes `age` because it falls in the 5%–30% range;
+- drops `deck` because its missingness is above 30% and direct imputation would be unreliable;
+- treats `embark_town` as redundant with `embarked` and does not use it for modeling.
+
+The exact percentages are generated from the actual loaded data rather than hard-coded.
+
+## EDA requirements covered
+
+`01_eda.py` produces:
+
+- `df.info()`
+- `df.describe()`
+- `df.shape`
+- missing percentages
+- IQR outlier counts for age and fare
+- fare mean, median, mode and skewness interpretation
+- survival rates by sex
+- survival rates by pclass
+- survival rates by sex + pclass
+- exactly the six-column correlation matrix required by the assignment
+- correlation heatmap
+- two strongest correlations by absolute off-diagonal coefficient
+- age/fare z-score before/after check
+- four distinct multivariate data-story charts, each described in `outputs/EDA_INTERPRETATIONS.md`
+
+The correlation matrix excludes `adult_male` and `alone`.
+
+## Modeling requirements covered
+
+`02_modeling.py`:
+
+1. Reads the same committed `titanic.csv`.
+2. Cleans it consistently with the EDA stage.
+3. Performs the stratified train/test split **before preprocessing**.
+4. Uses a `ColumnTransformer` containing training-only imputation, one-hot encoding, and `StandardScaler`.
+5. Trains Logistic Regression, Decision Tree, and Random Forest on the same split.
+6. Reports accuracy, precision, recall, F1, confusion matrix, ROC and AUC.
+7. Renders the Decision Tree with feature and class labels.
+8. Compares baseline, `class_weight='balanced'`, and SMOTE.
+9. Applies SMOTE only inside the training pipeline.
+10. Runs `GridSearchCV` over Random Forest `n_estimators`, `max_depth`, and `max_features`.
+11. Constructs the tuned Random Forest with `oob_score=True` and reports OOB score.
+12. Runs multivariate linear regression for fare.
+13. Reports MAE, RMSE, R² and Adjusted R².
+14. Creates a residual plot and calculates a diagnostic heteroscedasticity flag based on the correlation between fitted values and absolute residuals.
+15. Writes a final recommendation using the actual generated test metrics.
+16. Saves the complete fitted preprocessing + estimator pipeline with `joblib.dump`.
+17. Reloads the artifact and predicts directly from raw feature values.
+
+## Outputs
+
+Generated evidence includes:
+
+```text
+outputs/
+├── missing_percentages.csv
+├── survival_by_sex.csv
+├── survival_by_pclass.csv
+├── survival_by_sex_pclass.csv
+├── correlation_matrix.csv
+├── two_strongest_correlations.csv
+├── standardization_check.csv
+├── EDA_INTERPRETATIONS.md
+├── classification_metrics.csv
+├── imbalance_comparison.csv
+├── random_forest_grid_search.csv
+├── regression_metrics.csv
+├── model_comparison.csv
+├── artifact_check.txt
+└── FINAL_RECOMMENDATION.md
+```
+
+## Model metric groups
+
+Classification metrics and regression metrics are intentionally kept separate. Accuracy/precision/recall/F1/AUC measure classification behavior, while MAE/RMSE/R²/Adjusted R² measure the fare regression task. They are not treated as one common numerical scale.
+
+## Git requirement
+
+The assignment requires the repository's overall history to show a feature branch with at least two commits and a merge back to `main`.
+
+Example:
+
+```bash
+git checkout main
+git checkout -b feature/analytics-pipeline
+
+git add analytics/
+git commit -m "Add Titanic EDA and cleaning pipeline"
+
+git add analytics/
+git commit -m "Add modeling, tuning, regression and pipeline artifact"
+
+git checkout main
+git merge feature/analytics-pipeline
+```
 
 
 
